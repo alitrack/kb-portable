@@ -2,6 +2,10 @@
 
 便携知识库 PoC:静态三通道(向量/实体-关系图/Leiden 社区)+ 可选 SAG2/JEV 查询期动态层,全部收敛进 **一个 .duckdb 文件**,用 **duckdb-web(WASM,零服务端)** 在浏览器里直接开。
 
+## 在线演示
+
+**https://alitrack.github.io/kb-portable/** — 纯 GitHub Pages(零服务端):打开 → 点「演示: 直接载入 /kb.duckdb」→ 点「① 静态查询链」。40MB wasm 首次加载约几秒(视网速),之后五查 ~120ms。JEV 按钮在非 localhost 部署会提示自动降级(内网 sglang 公网不可达,设计内)。
+
 ## 数据源模型
 
 ```
