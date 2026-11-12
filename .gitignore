@@ -1,0 +1,7 @@
+web/node_modules/
+web/*.log
+kb_final.duckdb
+poctest.duckdb
+*.duckdb.wal
+.DS_Storeweb/vendor/
+.tantivy_index/**/*.lock
