@@ -39,7 +39,8 @@ input[type=text]{flex:1;min-width:260px;padding:6px 10px;border:1px solid #c9d6c
 <pre id="jevout">JEV 层结果会显示在这里(端点不可达时自动降级纯静态, 如实标注 degraded)。</pre>
 
 <script type="module">
-import * as duckdb from '/duckdb-wasm/duckdb-web-bundle.mjs';
+// 相对路径: GitHub Pages(站点在 /<repo>/ 子路径)和本地 serve(根下)都成立
+import * as duckdb from './duckdb-wasm/duckdb-web-bundle.mjs';
 
 const out = document.getElementById('out');
 const log = (el, t, cls) => {
@@ -55,7 +56,8 @@ let dbReady = false;
 // ---------- 引擎: 1.33 Statically Served 模式 ----------
 // 只声明 mvp: selectBundle 会预热全部声明的 bundle, eh(重负载)不入库则会导致 404 拖死实例化
 const MANUAL_BUNDLES = {
-  mvp: { mainModule: '/duckdb-wasm/duckdb-mvp.wasm', mainWorker: '/duckdb-wasm/duckdb-browser-mvp.worker.js' },
+  // mainWorker 相对页面 URL; mainModule 相对 worker 自身 URL(worker 与 wasm 同目录)
+  mvp: { mainModule: 'duckdb-mvp.wasm', mainWorker: './duckdb-wasm/duckdb-browser-mvp.worker.js' },
 };
 const bundle = await duckdb.selectBundle(MANUAL_BUNDLES);
 const worker = new Worker(bundle.mainWorker);
@@ -101,7 +103,7 @@ document.getElementById('load').onclick = async () => {
 };
 document.getElementById('autoload').onclick = async () => {
   try {
-    const r = await fetch('/kb.duckdb');
+    const r = await fetch('kb.duckdb');   // 相对路径: Pages(/kb-portable/ 子路径)与本地(根)都解析正确
     const buf = await r.arrayBuffer();
     await db.registerFileBuffer('/kb.duckdb', new Uint8Array(buf));
     if (conn) { try { await conn.close(); } catch(_) {} }

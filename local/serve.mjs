@@ -3,8 +3,8 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DATA = '/Users/sa/ws/kb-portable/web/data';
-const webroot = '/Users/sa/ws/kb-portable/web';   // 与 Pages 根一致(数据源/bundle/wasm 都挂这里)
+const DATA = '/Users/sa/ws/kb-portable/data';
+const webroot = '/Users/sa/ws/kb-portable';   // 与 Pages 根一致(仓库根 = 站点根: index.html/kb.duckdb/duckdb-wasm/data 都挂这里)
 const MIME = { '.wasm': 'application/wasm', '.js': 'text/javascript', '.cjs': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.parquet': 'application/octet-stream', '.html': 'text/html', '.duckdb': 'application/octet-stream' };
 // JEV 裁判端点: 默认指向本机 sglang(127.0.0.1:8014); 内网实例用 JUDGE_HOST/JUDGE_PORT 覆盖(值不入库)
 const JUDGE = { host: process.env.JUDGE_HOST || '127.0.0.1', port: Number(process.env.JUDGE_PORT || 8014) };
