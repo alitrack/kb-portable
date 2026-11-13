@@ -1,5 +1,6 @@
 local/node_modules/
 local/*.log
+local/diag_*.mjs
 kb_final.duckdb
 poctest.duckdb
 *.duckdb.wal
