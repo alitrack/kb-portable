@@ -22,7 +22,7 @@ input[type=text]{flex:1;min-width:260px;padding:6px 10px;border:1px solid #c9d6c
 <body>
 <h1>KB 便携包 × duckdb-web · 数据源 = .duckdb 文件本身</h1>
 <p>引擎: <span id="ver">…</span>
-<span class="note">静态: 引擎自包含(本地 bundle+wasm);动态: JEV 经同源 /jev 代理(免 CORS)</span></p>
+<span class="note">静态: 引擎自包含(本地 bundle+wasm);动态: JEV 在线配置端点(直连, 可选 key; localhost 可走同源 /jev 代理)</span></p>
 <div class="row">
   <input type="file" id="file" accept=".duckdb">
   <button id="load">载入 .duckdb</button>
@@ -32,6 +32,14 @@ input[type=text]{flex:1;min-width:260px;padding:6px 10px;border:1px solid #c9d6c
 <pre id="out">等待操作…</pre>
 
 <h2>② 可选动态层: JEV 证据裁判(SAG2, 查询期 LLM)</h2>
+<p class="note">裁判端点 = 任意 OpenAI 兼容 API(实测对跨域请求回显 Origin、预检放行 Authorization)。留空: localhost 走同源 /jev 代理(免 key), 其它部署自动降级纯静态链。</p>
+<div class="row">
+  <input type="text" id="jevurl" placeholder="端点 base, 如 http://10.10.10.115:8014/v1(留空=自动)" style="min-width:300px">
+  <input type="password" id="jevkey" placeholder="API key(可选)" style="min-width:140px">
+  <input type="text" id="jevmodel" placeholder="模型名" value="qwen3.8-27b" style="min-width:130px">
+  <button id="jevtest">测试连接</button>
+  <span id="jevstatus" class="note"></span>
+</div>
 <div class="row">
   <input type="text" id="question" value="GraphRAG 是怎么改进检索的?">
   <button class="jev" id="jevgo">跑 JEV(种子判分→词扩展二跳)</button>
@@ -152,20 +160,69 @@ document.getElementById('go').onclick = runStatic;
 const JEVOUT = document.getElementById('jevout');
 let judgeCalls = 0;
 
+// ---------- JEV 在线配置(OpenAI 兼容端点, 直连; 免服务端) ----------
+// 实测: sglang 类服务端 CORS 回显任意 Origin, OPTIONS 预检放行 Authorization;
+// https 页面 fetch http 内网端点不被 mixed content 拦截(Chrome 实测 200)。
+const isLocalHost = /(^localhost$)|(^127\.0\.0\.1$)/.test(location.hostname);
+function jevCfg() {
+  let base = (localStorage.getItem('jev_url') || document.getElementById('jevurl').value || '').trim();
+  const key = (localStorage.getItem('jev_key') || document.getElementById('jevkey').value || '').trim();
+  const model = (localStorage.getItem('jev_model') || document.getElementById('jevmodel').value || '').trim();
+  if (!base && isLocalHost) return { url: '/jev', key: '', model: model || 'qwen3.8-27b', local: true };
+  return { url: base.replace(/\/+$/, '') + '/chat/completions', key, model, local: false };
+}
+function saveJev() {
+  const url = document.getElementById('jevurl').value.trim();
+  const key = document.getElementById('jevkey').value.trim();
+  const model = document.getElementById('jevmodel').value.trim();
+  localStorage.setItem('jev_url', url);
+  localStorage.setItem('jev_key', key);
+  localStorage.setItem('jev_model', model);
+}
+for (const id of ['jevurl', 'jevkey', 'jevmodel']) document.getElementById(id).addEventListener('change', saveJev);
+
+async function callJudge(messages) {
+  const { url, key, model, local } = jevCfg();
+  if (!url) throw new Error('JEV 端点未配置(填上方 base, 或 localhost 默认走同源 /jev 代理)');
+  const body = { model: model || 'qwen3.8-27b', messages, max_tokens: 128 };
+  if (!local && !('enable_thinking' in (body.chat_template_kwargs || {}))) {
+    // thinking 系模型(如 qwen3 系列): reasoning 会先吃光 max_tokens, 顶层关思考(sglang 忽略 extra_body 嵌套)
+    body.chat_template_kwargs = { enable_thinking: false };
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (key) headers['Authorization'] = 'Bearer ' + key;
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 60000);
+  let r;
+  try { r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctl.signal }); }
+  finally { clearTimeout(t); }
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' (' + url + ')');
+  return r.json();
+}
+
+document.getElementById('jevtest').onclick = async () => {
+  const st = document.getElementById('jevstatus');
+  st.className = 'note';
+  saveJev();
+  const { url } = jevCfg();
+  if (!url) { st.textContent = '请先填端点 base(或 localhost 留空走 /jev 代理)'; st.className = 'note err'; return; }
+  st.textContent = '测试中…';
+  try {
+    const j = await callJudge([{ role: 'user', content: '只回复数字 1' }]);
+    const c = (j.choices?.[0]?.message?.content || '').trim();
+    st.textContent = 'OK: ' + j.model + ' → ' + JSON.stringify(c.slice(0, 20));
+    st.className = 'note ok';
+  } catch (e) {
+    st.textContent = 'FAIL: ' + e.message;
+    st.className = 'note err';
+  }
+};
+
 async function judge(question, candidate) {
   judgeCalls++;
-  const r = await fetch('/jev', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'qwen3.8-27b',
-      messages: [
-        { role: 'user', content: `你是证据裁判。判断下面的候选段落是否是回答问题的【必需证据】。\n问题: ${question}\n候选段落: ${candidate}\n只回答 0(否)或 1(是)。` },
-      ],
-    }),
-  });
-  if (!r.ok) throw new Error(`/jev HTTP ${r.status} (Pages/静态部署无代理, 预期内)`);
-  const j = await r.json();
+  const j = await callJudge([
+    { role: 'user', content: `你是证据裁判。判断下面的候选段落是否是回答问题的【必需证据】。\n问题: ${question}\n候选段落: ${candidate}\n只回答 0(否)或 1(是)。` },
+  ]);
   const c = (j.choices?.[0]?.message?.content || '').trim();
   return c === '1' ? 1 : 0;
 }
@@ -230,11 +287,11 @@ async function runJEV() {
     log(JEVOUT, `\nDEGRADED: JEV 端点不可达(${e.message}), 自动降级纯静态链。调用 ${judgeCalls} 次。`, 'warn');
   }
 }
-const isLocalHost = /(^localhost$)|(^127\.0\.0\.1$)/.test(location.hostname);
 document.getElementById('jevgo').onclick = () => {
-  if (!isLocalHost) {
-    JEVOUT.innerHTML = '';
-    log(JEVOUT, '此部署(静态 / GitHub Pages)无同源 /jev 代理 → JEV 动态层不可用, 自动降级纯静态链(设计内)。本机 node launcher.mjs → :8210 可跑完整两层。', 'warn');
+  JEVOUT.innerHTML = '';
+  const { url } = jevCfg();
+  if (!url) {
+    log(JEVOUT, 'JEV 端点未配置 → 自动降级纯静态链(设计内)。填上方 base(任意 OpenAI 兼容, 实测 CORS 回显 Origin + 预检放行 Authorization, 直连免服务端代理)+ 可选 key, 点「测试连接」验证后即可跑。', 'warn');
     return;
   }
   runJEV();
