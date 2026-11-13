@@ -94,14 +94,18 @@ async function q(sql) {
 }
 
 // ---------- 载入 .duckdb 文件 = 数据源 ----------
+// 注意: registerFileBuffer 内部 postTask(msg, [r.buffer]) 会把 ArrayBuffer transfer 进
+// worker(原 buffer 随即 detach, byteLength 变 0)。因此必须在 register【之前】抓大小,
+// 否则显示 0 KB(数据本身完好,已在 worker 内,引擎读得到)—— 之前就是踩了这个。
 async function loadFile(file) {
   if (conn) { try { await conn.close(); } catch(_) {} conn = null; }
   const buf = await file.arrayBuffer();
+  const sizeKB = (buf.byteLength / 1024).toFixed(0);   // ← 先抓, transfer 后读不到
   await db.registerFileBuffer('/kb.duckdb', new Uint8Array(buf));
   await db.open({ path: '/kb.duckdb' });
   conn = await db.connect();
   dbReady = true;
-  return (buf.byteLength / 1024).toFixed(0) + ' KB';
+  return sizeKB + ' KB';
 }
 document.getElementById('load').onclick = async () => {
   const f = document.getElementById('file').files[0];
@@ -113,12 +117,13 @@ document.getElementById('autoload').onclick = async () => {
   try {
     const r = await fetch('kb.duckdb');   // 相对路径: Pages(/kb-portable/ 子路径)与本地(根)都解析正确
     const buf = await r.arrayBuffer();
+    const sizeKB = (buf.byteLength / 1024).toFixed(0);   // ← 先抓, transfer 后读不到
     await db.registerFileBuffer('/kb.duckdb', new Uint8Array(buf));
     if (conn) { try { await conn.close(); } catch(_) {} }
     await db.open({ path: '/kb.duckdb' });
     conn = await db.connect();
     dbReady = true;
-    log(out, `已载入 /kb.duckdb (${(buf.byteLength/1024).toFixed(0)} KB) —— 便携包本体直接做数据源`, 'ok');
+    log(out, `已载入 /kb.duckdb (${sizeKB} KB) —— 便携包本体直接做数据源`, 'ok');
   } catch (e) { log(out, 'OPEN FAIL: ' + e.message, 'err'); }
 };
 
