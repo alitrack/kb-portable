@@ -44,6 +44,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/jev' && req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'content-type' }); return res.end(); }
   let p;
   if (url.pathname === '/') p = path.join(webroot, 'index.html');
+  else if (url.pathname === '/favicon.ico') p = path.join(webroot, 'favicon.ico');
   else if (url.pathname === '/kb.duckdb') p = path.join(webroot, 'kb.duckdb');   // 包本体(与 Pages 同路径)
   else if (url.pathname.startsWith('/data/')) p = path.join(DATA, url.pathname.slice(6));
   else if (url.pathname.startsWith('/duckdb-wasm/')) p = path.join(webroot, 'duckdb-wasm', url.pathname.slice(13)); // 入库版(自包含 bundle + mvp wasm)

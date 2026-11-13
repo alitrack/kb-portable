@@ -180,6 +180,7 @@ function jevCfg() {
   const key = (localStorage.getItem('jev_key') || document.getElementById('jevkey').value || '').trim();
   const model = (localStorage.getItem('jev_model') || document.getElementById('jevmodel').value || '').trim();
   if (!base && isLocalHost) return { url: '/jev', key: '', model: model || 'qwen3.8-27b', local: true };
+  if (!base) return { url: '', key, model: model || 'qwen3.8-27b', local: false };  // 未配置: 不构造裸路径(避免打到 Pages 服务器 405)
   return { url: base.replace(/\/+$/, '') + '/chat/completions', key, model, local: false };
 }
 function saveJev() {
