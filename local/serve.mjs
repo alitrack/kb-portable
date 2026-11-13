@@ -18,6 +18,7 @@ function proxyJudge(req, res) {
     try { payload = JSON.parse(body || '{}'); } catch { res.writeHead(400); return res.end('bad json'); }
     // 注入 thinking-model 适配(顶层 chat_template_kwargs; sglang 忽略 extra_body)
     payload.chat_template_kwargs = { ...(payload.chat_template_kwargs || {}), enable_thinking: false };
+    // JEV 判分(0/1)由浏览器显式传 max_tokens:8;回答层传更大(如 600)
     if (payload.max_tokens === undefined) payload.max_tokens = 8;
     const data = JSON.stringify(payload);
     const up = http.request({

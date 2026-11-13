@@ -1,0 +1,8 @@
+key	value
+format_version	1.x (duckdb 1.4.4 line)
+writable_by	1.33 wasm (duckdb-web browser) + 2.0 native (desktop) — 一个包到处开
+layer_static	chunks(词频TF embedding)/nodes(Leiden社区)/edges(共现实体图+chunk_ids证据回溯)
+layer_dynamic	可选 JEV(SAG2) 查询期层: 浏览器 JS, 端点不可达自动降级
+origin	真实语料 CMRC 2018(hfl/cmrc2018) 100 段 + jieba 词频向量 + 共现实体图
+rebuilt_at	2026-11-13
+usage	registerFileBuffer 载入即可查询; 数据本体即包

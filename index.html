@@ -41,10 +41,10 @@ input[type=text]{flex:1;min-width:260px;padding:6px 10px;border:1px solid #c9d6c
   <span id="jevstatus" class="note"></span>
 </div>
 <div class="row">
-  <input type="text" id="question" value="GraphRAG 是怎么改进检索的?">
-  <button class="jev" id="jevgo">跑 JEV(种子判分→词扩展二跳)</button>
+  <input type="text" id="question" value="2008年北京奥运会中国田径队和中国摔跤队的领队分别是谁?">
+  <button class="jev" id="jevgo">跑 JEV(召回→精排→带引文回答)</button>
 </div>
-<pre id="jevout">JEV 层结果会显示在这里(端点不可达时自动降级纯静态, 如实标注 degraded)。</pre>
+<pre id="jevout">JEV 层结果会显示在这里(召回 n-gram 词法 → JEV 判 1 证据 → 回答模型生成 [doc_id] 引用)。端点不可达自动降级, 如实标注。</pre>
 
 <script type="module">
 // 相对路径: GitHub Pages(站点在 /<repo>/ 子路径)和本地 serve(根下)都成立
@@ -71,6 +71,7 @@ const bundle = await duckdb.selectBundle(MANUAL_BUNDLES);
 const worker = new Worker(bundle.mainWorker);
 const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
 await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+window.__db = db;   // 暴露给 page.evaluate 诊断 / 回答层复用(无副作用)
 document.getElementById('ver').textContent = 'duckdb-wasm ' + (await db.getVersion());
 log(out, '引擎实例化完成: ' + (await db.getVersion()) + '(1.x 线, 与 duckdb-web 同代)', 'ok');
 
@@ -136,13 +137,18 @@ async function runStatic() {
     const counts = await q('SELECT (SELECT count(*) FROM chunks) c, (SELECT count(*) FROM nodes) n, (SELECT count(*) FROM edges) e, (SELECT count(*) FROM meta) m');
     log(out, '表行数 chunks/nodes/edges/meta: ' + JSON.stringify(counts[0]), 'ok');
 
+    // 自适应维度: 先探测 embedding 维度, 再构造单位种子向量(取维度 1 为 1)
+    const dimR = await q('SELECT array_length(embedding) FROM chunks LIMIT 1');
+    const dim = Number(dimR[0][0]) || 4;
+    const seedVec = Array.from({length: dim}, (_, i) => i === 1 ? 1.0 : 0.0);
+    const lit = seedVec.map(x => x.toString()).join(',');
     const seed = await q(`
-      WITH q AS (SELECT [0.85, 0.15, 0.0, 0.15]::FLOAT[4] v),
+      WITH q AS (SELECT [${lit}]::FLOAT[${dim}] v),
       parts AS (SELECT c.id, c.text,
-               (SELECT sum((q.v[i] - c.embedding[i]) * (q.v[i] - c.embedding[i])) FROM unnest(range(0,4)) t(i)) d2
+               (SELECT sum((q.v[i] - c.embedding[i]) * (q.v[i] - c.embedding[i])) FROM unnest(range(0,${dim})) t(i)) d2
         FROM chunks c, q)
       SELECT id, text, sqrt(d2) d FROM parts ORDER BY d LIMIT 3`);
-    log(out, '\n① 向量种子(纯 SQL L2, 无 vss 依赖):\n' +
+    log(out, `\n① 向量种子(纯 SQL L2, ${dim}维, 无 vss 依赖):\n` +
         seed.map(r => `   ${r[0]} d=${(+r[2]).toFixed(3)}  ${String(r[1]).slice(0,44)}`).join('\n'), 'ok');
 
     const graph = await q('SELECT e.source_id, e.relation, e.target_id, s.community FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id ORDER BY 1');
@@ -186,10 +192,10 @@ function saveJev() {
 }
 for (const id of ['jevurl', 'jevkey', 'jevmodel']) document.getElementById(id).addEventListener('change', saveJev);
 
-async function callJudge(messages) {
+async function callJudge(messages, maxTokens = 128) {
   const { url, key, model, local } = jevCfg();
   if (!url) throw new Error('JEV 端点未配置(填上方 base, 或 localhost 默认走同源 /jev 代理)');
-  const body = { model: model || 'qwen3.8-27b', messages, max_tokens: 128 };
+  const body = { model: model || 'qwen3.8-27b', messages, max_tokens: maxTokens };
   if (!local && !('enable_thinking' in (body.chat_template_kwargs || {}))) {
     // thinking 系模型(如 qwen3 系列): reasoning 会先吃光 max_tokens, 顶层关思考(sglang 忽略 extra_body 嵌套)
     body.chat_template_kwargs = { enable_thinking: false };
@@ -232,16 +238,38 @@ async function judge(question, candidate) {
   return c === '1' ? 1 : 0;
 }
 
-// 从判 1 的种子段抽扩展词(简化版 SAG2 TF-IDF: 词频 top, 去停用词)
-function expandWords(texts, k = 3) {
-  const stop = new Set(['the','and','for','with','use','uses','using','is','a','an','of','to','in','on','by','that','which','improve','provides','inside','supports']);
-  const freq = new Map();
-  for (const t of texts) {
-    for (const w of t.toLowerCase().match(/[a-z]{3,}/g) || []) {
-      if (!stop.has(w)) freq.set(w, (freq.get(w) || 0) + 1);
-    }
-  }
-  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, k).map(([w]) => w);
+// ---------- 回答层: 召回(n-gram 词法,零模型) → JEV 判 1 证据 → 回答模型生成 [doc_id] 引用 ----------
+// 中文停用词(功能词 + 超泛词)
+const CJK_STOP = new Set(['的','了','是','在','和','与','及','或','等','有','为','被','把','从','到','年','月','日','一个','这','那','也','都','很','可以','于','上','下','面','中','内','人','个','位','次','件','名','其','该','本','此','之','不','无','但','而','则','以','用','由','向','对','让','使','给','什么','怎么','如何','多少','哪','谁','为什么','他','她','它','我','你','您','们','同','跟','将','就','才','还','又','再','更','最','进行','作为','通过','因为']);
+// 从问题抽 2-4 字 CJK n-gram(去停用)
+function cjkGrams(text) {
+  const cjk = text.replace(/[^\u4e00-\u9fff]/g, ' ');
+  const toks = cjk.split(/\s+/).filter(x => x.length >= 2);
+  const set = new Set();
+  for (const tk of toks) for (let n = 2; n <= Math.min(4, tk.length); n++)
+    for (let i = 0; i + n <= tk.length; i++) set.add(tk.slice(i, i + n));
+  return [...set].filter(g => g.length >= 2 && !CJK_STOP.has(g));
+}
+// 召回: 把全部 chunks 拉进内存, JS 里按 n-gram 命中数排序(100 段规模 O(n·g) 可接受)
+async function recallChunks(question, topK = 8) {
+  const t = await conn.query('SELECT id, text FROM chunks');
+  const rows = [];
+  for (let i = 0; i < t.numRows; i++) rows.push([String(t.getChildAt(0).get(i)), String(t.getChildAt(1).get(i))]);
+  const gs = cjkGrams(question);
+  return rows.map(([id, text]) => {
+    let hit = 0; for (const g of gs) if (text.includes(g)) hit++;
+    return { id, text, hit };
+  }).filter(r => r.hit > 0).sort((a, b) => b.hit - a.hit).slice(0, topK);
+}
+// 回答: JEV 判 1 的证据段 -> 回答模型 -> 带 [doc_id] 引用
+async function answer(question, evidence) {
+  const sys = '你是中文知识库助手。只依据下方给定的【证据段落】回答问题, 不得引入证据之外的知识。答案中每处来自证据的事实后用 [doc_id] 标注来源(如 [60])。若证据不足以回答, 明确说"证据不足"。';
+  const ev = evidence.map(e => `[${e.id}] ${e.text}`).join('\n');
+  const j = await callJudge([
+    { role: 'system', content: sys },
+    { role: 'user', content: `问题: ${question}\n\n证据段落:\n${ev}\n\n回答:` },
+  ], 800);
+  return (j.choices?.[0]?.message?.content || '').trim();
 }
 
 async function runJEV() {
@@ -251,45 +279,23 @@ async function runJEV() {
   judgeCalls = 0;
   const t0 = performance.now();
   try {
-    // 种子 = 静态向量 top3
-    const seed = await q(`
-      WITH q AS (SELECT [0.85, 0.15, 0.0, 0.15]::FLOAT[4] v),
-      parts AS (SELECT c.id, c.text,
-               (SELECT sum((q.v[i] - c.embedding[i]) * (q.v[i] - c.embedding[i])) FROM unnest(range(0,4)) t(i)) d2
-        FROM chunks c, q)
-      SELECT id, text FROM parts ORDER BY d2 LIMIT 3`);
-    log(JEVOUT, `问题: ${question}\n种子(静态向量 top3): ${seed.map(r => r[0]).join(', ')}\n`, 'ok');
+    // ① 召回(零模型): n-gram 词法
+    const cands = await recallChunks(question, 8);
+    log(JEVOUT, `问题: ${question}\n① 召回 top${cands.length}: ${cands.map(c => c.id + '(' + c.hit + ')').join(', ')}\n`, 'ok');
+    if (!cands.length) { log(JEVOUT, '召回为空 → 证据不足, 无法回答。', 'warn'); return; }
 
-    // 首跳: 逐候选判分
-    const seen = new Set();
-    const hits = [];
-    for (const [id, text] of seed) { seen.add(id); hits.push({ id, text, jev: await judge(question, text) }); }
-    log(JEVOUT, `首跳判分: ` + hits.map(h => `${h.id}=${h.jev}`).join('  '), 'ok');
+    // ② JEV 精排(查询期 LLM): 逐候选判"是否必需证据" 0/1
+    for (const c of cands) c.jev = await judge(question, c.text);
+    log(JEVOUT, `② JEV 判分: ${cands.map(c => `${c.id}=${c.jev}`).join('  ')}  (判分调用 ${judgeCalls} 次)\n`, 'ok');
+    const evidence = cands.filter(c => c.jev === 1);
+    log(JEVOUT, `③ 必需证据: ${evidence.map(c => c.id).join(', ') || '(无)'}\n`, 'ok');
+    if (!evidence.length) { log(JEVOUT, 'JEV 未判出必需证据 → 证据不足。', 'warn'); return; }
 
-    // 二跳: 从 jev=1 的段抽扩展词, 词法再搜(1.x 无 tantivy -> SQL LIKE 近似, 玩具库规模下等价), 对新段判分
-    const pos = hits.filter(h => h.jev === 1).map(h => h.text);
-    let hop2 = '';
-    if (pos.length) {
-      const words = expandWords(pos);
-      const cond = words.map(w => `lower(text) LIKE '%${w}%'`).join(' OR ');
-      const cand = await q(`SELECT id, text FROM chunks WHERE id NOT IN (${[...seen].map(x => `'${x}'`).join(',')}) AND (${cond})`);
-      if (cand.length) {
-        for (const [id, text] of cand) {
-          seen.add(id);
-          const j = await judge(question, text);
-          if (j) hits.push({ id, text, jev: 1, hop2: true });
-          hop2 += `\n二跳 ${id}(${words.join('/')}): jev=${j}\n`;
-        }
-      }
-      log(JEVOUT, `扩展词: ${words.join(', ')}\n${hop2 || '(无新候选)'}`, 'ok');
-    }
-
-    // 终排: jev=1 在前
-    const ranked = hits.filter(h => h.jev === 1).sort((a, b) => (a.hop2 ? 1 : 0) - (b.hop2 ? 1 : 0));
-    log(JEVOUT, `\nJEV 终排(必需证据):\n` + (ranked.length ? ranked.map(h => `   ${h.id}${h.hop2 ? '(二跳找回)' : ''}  ${String(h.text).slice(0, 52)}`).join('\n') : '   (无)') +
-      `\n\n调用 ${judgeCalls} 次, ${(performance.now()-t0).toFixed(0)}ms —— 端点可达: 动态层生效。`, 'ok');
+    // ④ 回答(8014 生成): 带 [doc_id] 引用
+    const ans = await answer(question, evidence);
+    log(JEVOUT, `\n④ 带引文回答:\n   ${ans}\n\n总耗时 ${(performance.now()-t0).toFixed(0)}ms —— 召回→JEV精排→回答 全在浏览器, 数据源就是那个 .duckdb。`, 'ok');
   } catch (e) {
-    log(JEVOUT, `\nDEGRADED: JEV 端点不可达(${e.message}), 自动降级纯静态链。调用 ${judgeCalls} 次。`, 'warn');
+    log(JEVOUT, `\nDEGRADED: JEV/回答端点不可达(${e.message}), 自动降级纯静态链。判分调用 ${judgeCalls} 次。`, 'warn');
   }
 }
 document.getElementById('jevgo').onclick = () => {
